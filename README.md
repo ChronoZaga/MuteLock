@@ -1,7 +1,5 @@
 # MuteLock
 
-MuteLock
-
 MuteLock is a lightweight utility that runs in the background and automatically mutes the sound on your Windows PC when you lock, restart, or shut down the system.
 
 
