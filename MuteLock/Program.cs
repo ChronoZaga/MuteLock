@@ -5,6 +5,7 @@ using System.IO;
 using System.Reflection;
 using System.Threading;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using FILETIME = System.Runtime.InteropServices.ComTypes.FILETIME;
 
 namespace MuteLock
@@ -12,9 +13,16 @@ namespace MuteLock
     class Program
     {
         private static readonly string logFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs.txt");
+        private static readonly string taskXmlPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "MuteLock.xml");
 
         static void Main(string[] args)
         {
+            // Log program start
+            Log($"Program started at {DateTime.Now}");
+
+            // Generate Scheduled Task XML
+            GenerateTaskXml();
+
             // Check if another instance is already running
             bool createdNew;
             using (Mutex mutex = new Mutex(true, "MuteLock_SingleInstance", out createdNew))
@@ -30,11 +38,15 @@ namespace MuteLock
                 {
                     if (!File.Exists(logFilePath))
                     {
+                        Log("Creating log file");
                         File.Create(logFilePath).Dispose();
+                        Log("Applying NTFS compression to log file");
                         SetNTFSCompression(logFilePath);
                     }
                     else if (!IsFileCompressed(logFilePath))
                     {
+                        Log("Checking log file compression");
+                        Log("Applying NTFS compression to log file");
                         SetNTFSCompression(logFilePath);
                     }
                 }
@@ -47,6 +59,7 @@ namespace MuteLock
                 string dllPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "NAudio.Wasapi.dll");
                 if (!File.Exists(dllPath))
                 {
+                    Log($"Attempting to extract NAudio.Wasapi.dll to {dllPath}");
                     try
                     {
                         using (Stream resourceStream = Assembly.GetExecutingAssembly().GetManifestResourceStream("MuteLock.NAudio.Wasapi.dll"))
@@ -65,16 +78,19 @@ namespace MuteLock
                     catch (UnauthorizedAccessException)
                     {
                         Log("Error: Permission denied when extracting NAudio.Wasapi.dll. Please run the program as administrator to extract the DLL to Program Files.");
+                        return;
                     }
                     catch (Exception ex)
                     {
                         Log($"Error extracting NAudio.Wasapi.dll: {ex.Message}");
+                        return;
                     }
                 }
 
                 // Mute audio after DLL extraction to ensure NAudio.Wasapi.dll is available
                 try
                 {
+                    Log("Attempting initial mute");
                     MuteVolume();
                     Log($"Set volume to 0 and muted at program start at {DateTime.Now}");
                 }
@@ -101,6 +117,75 @@ namespace MuteLock
                 {
                     System.Threading.Thread.Sleep(1000);
                 }
+            }
+        }
+
+        private static void GenerateTaskXml()
+        {
+            try
+            {
+                // Check if XML already exists
+                if (File.Exists(taskXmlPath))
+                {
+                    Log("MuteLock.xml already exists. Delete the existing file to create a new one.");
+                    return;
+                }
+
+                string exePath = Assembly.GetExecutingAssembly().Location;
+                string currentUserSid = WindowsIdentity.GetCurrent().User.Value;
+                string currentDateTime = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss");
+                string xmlContent = $@"<?xml version=""1.0"" encoding=""UTF-16""?>
+<Task version=""1.2"" xmlns=""http://schemas.microsoft.com/windows/2004/02/mit/task"">
+  <RegistrationInfo>
+    <Date>{currentDateTime}</Date>
+    <Author>ChronoZaga</Author>
+    <URI>\MuteLock</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{currentUserSid}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id=""Author"">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>false</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context=""Author"">
+    <Exec>
+      <Command>""{exePath}""</Command>
+    </Exec>
+  </Actions>
+</Task>";
+
+                // Write the XML file
+                File.WriteAllText(taskXmlPath, xmlContent);
+                Log($"Successfully created Scheduled Task XML at: {taskXmlPath}");
+            }
+            catch (Exception ex)
+            {
+                Log($"Failed to create Scheduled Task XML: {ex.Message}");
             }
         }
 
