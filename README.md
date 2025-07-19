@@ -13,11 +13,6 @@ I recommend making a scheduled task to run the app at user login.
 -Simple and lightweight design.
 
 
-# Current Version
-
-v1.0: The initial release is fully functional but runs as a standard application.
-
-
 # Roadmap
 
 v2.0 Goal: Convert MuteLock to run as a Windows Service for improved reliability and seamless operation.
