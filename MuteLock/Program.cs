@@ -6,6 +6,9 @@ using System.Reflection;
 using System.Threading;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
+using System.ComponentModel;
+using System.ServiceProcess;
+using System.Diagnostics;
 using FILETIME = System.Runtime.InteropServices.ComTypes.FILETIME;
 
 namespace MuteLock
@@ -17,106 +20,211 @@ namespace MuteLock
 
         static void Main(string[] args)
         {
-            // Log program start
-            Log($"Program started at {DateTime.Now}");
-
-            // Generate Scheduled Task XML
-            GenerateTaskXml();
-
-            // Check if another instance is already running
-            bool createdNew;
-            using (Mutex mutex = new Mutex(true, "MuteLock_SingleInstance", out createdNew))
+            if (Environment.UserInteractive)
             {
-                if (!createdNew)
+                if (args.Length > 0)
                 {
-                    Log("Another instance of MuteLock is already running. Exiting.");
-                    return;
-                }
-
-                // Ensure log file exists and apply NTFS compression if needed
-                try
-                {
-                    if (!File.Exists(logFilePath))
+                    if (string.Equals(args[0], "/installservice", StringComparison.OrdinalIgnoreCase))
                     {
-                        Log("Creating log file");
-                        File.Create(logFilePath).Dispose();
-                        Log("Applying NTFS compression to log file");
-                        SetNTFSCompression(logFilePath);
+                        InstallService();
+                        return;
                     }
-                    else if (!IsFileCompressed(logFilePath))
+                    else if (string.Equals(args[0], "/uninstallservice", StringComparison.OrdinalIgnoreCase))
                     {
-                        Log("Checking log file compression");
-                        Log("Applying NTFS compression to log file");
-                        SetNTFSCompression(logFilePath);
+                        UninstallService();
+                        return;
                     }
                 }
-                catch (Exception ex)
-                {
-                    Log($"Failed to create or compress log file: {ex.Message}");
-                }
 
-                // Extract embedded NAudio.Wasapi.dll if it doesn't exist
-                string dllPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "NAudio.Wasapi.dll");
-                if (!File.Exists(dllPath))
+                // Original console mode logic
+                // Log program start
+                Log($"Program started at {DateTime.Now}");
+
+                // Generate Scheduled Task XML
+                GenerateTaskXml();
+
+                // Check if another instance is already running
+                bool createdNew;
+                using (Mutex mutex = new Mutex(true, "MuteLock_SingleInstance", out createdNew))
                 {
-                    Log($"Attempting to extract NAudio.Wasapi.dll to {dllPath}");
+                    if (!createdNew)
+                    {
+                        Log("Another instance of MuteLock is already running. Exiting.");
+                        return;
+                    }
+
+                    // Ensure log file exists and apply NTFS compression if needed
                     try
                     {
-                        using (Stream resourceStream = Assembly.GetExecutingAssembly().GetManifestResourceStream("MuteLock.NAudio.Wasapi.dll"))
+                        if (!File.Exists(logFilePath))
                         {
-                            if (resourceStream == null)
-                            {
-                                Log("Error: Embedded NAudio.Wasapi.dll resource not found.");
-                                return;
-                            }
-                            using (FileStream fileStream = new FileStream(dllPath, FileMode.Create, FileAccess.Write))
-                            {
-                                resourceStream.CopyTo(fileStream);
-                            }
+                            Log("Creating log file");
+                            File.Create(logFilePath).Dispose();
+                            Log("Applying NTFS compression to log file");
+                            SetNTFSCompression(logFilePath);
                         }
-                    }
-                    catch (UnauthorizedAccessException)
-                    {
-                        Log("Error: Permission denied when extracting NAudio.Wasapi.dll. Please run the program as administrator to extract the DLL to Program Files.");
-                        return;
+                        else if (!IsFileCompressed(logFilePath))
+                        {
+                            Log("Checking log file compression");
+                            Log("Applying NTFS compression to log file");
+                            SetNTFSCompression(logFilePath);
+                        }
                     }
                     catch (Exception ex)
                     {
-                        Log($"Error extracting NAudio.Wasapi.dll: {ex.Message}");
-                        return;
+                        Log($"Failed to create or compress log file: {ex.Message}");
+                    }
+
+                    // Extract embedded NAudio.Wasapi.dll if it doesn't exist
+                    string dllPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "NAudio.Wasapi.dll");
+                    if (!File.Exists(dllPath))
+                    {
+                        Log($"Attempting to extract NAudio.Wasapi.dll to {dllPath}");
+                        try
+                        {
+                            using (Stream resourceStream = Assembly.GetExecutingAssembly().GetManifestResourceStream("MuteLock.NAudio.Wasapi.dll"))
+                            {
+                                if (resourceStream == null)
+                                {
+                                    Log("Error: Embedded NAudio.Wasapi.dll resource not found.");
+                                    return;
+                                }
+                                using (FileStream fileStream = new FileStream(dllPath, FileMode.Create, FileAccess.Write))
+                                {
+                                    resourceStream.CopyTo(fileStream);
+                                }
+                            }
+                        }
+                        catch (UnauthorizedAccessException)
+                        {
+                            Log("Error: Permission denied when extracting NAudio.Wasapi.dll. Please run the program as administrator to extract the DLL to Program Files.");
+                            return;
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($"Error extracting NAudio.Wasapi.dll: {ex.Message}");
+                            return;
+                        }
+                    }
+
+                    // Mute audio after DLL extraction to ensure NAudio.Wasapi.dll is available
+                    try
+                    {
+                        Log("Attempting initial mute");
+                        MuteVolume();
+                        Log($"Set volume to 0 and muted at program start at {DateTime.Now}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"Error during initial mute: {ex.Message}");
+                    }
+
+                    // Subscribe to session switch events (lock/unlock)
+                    SystemEvents.SessionSwitch += SystemEvents_SessionSwitch;
+
+                    // Subscribe to session end events (log out, shutdown)
+                    SystemEvents.SessionEnded += SystemEvents_SessionEnded;
+
+                    // Handle application exit
+                    AppDomain.CurrentDomain.ProcessExit += (s, e) =>
+                    {
+                        SystemEvents.SessionSwitch -= SystemEvents_SessionSwitch;
+                        SystemEvents.SessionEnded -= SystemEvents_SessionEnded;
+                    };
+
+                    // Keep the application running
+                    while (true)
+                    {
+                        System.Threading.Thread.Sleep(1000);
                     }
                 }
+            }
+            else
+            {
+                ServiceBase.Run(new MuteLockService());
+            }
+        }
 
-                // Mute audio after DLL extraction to ensure NAudio.Wasapi.dll is available
-                try
+        private static void InstallService()
+        {
+            if (!IsAdministrator())
+            {
+                Log("Please run the program as administrator to install the service.");
+                return;
+            }
+
+            string exePath = $"\"{Assembly.GetExecutingAssembly().Location}\"";
+            string serviceName = "MuteLock";
+
+            try
+            {
+                RunCommand("sc", $"create {serviceName} binpath= {exePath} start= auto");
+                RunCommand("sc", $"description {serviceName} \"Mutes audio on lock, unlock, and session end events.\"");
+                RunCommand("sc", $"start {serviceName}");
+                Log("Service installed and started successfully.");
+            }
+            catch (Exception ex)
+            {
+                Log($"Failed to install service: {ex.Message}");
+            }
+        }
+
+        private static void UninstallService()
+        {
+            if (!IsAdministrator())
+            {
+                Log("Please run the program as administrator to uninstall the service.");
+                return;
+            }
+
+            string serviceName = "MuteLock";
+
+            try
+            {
+                RunCommand("sc", $"stop {serviceName}");
+                RunCommand("sc", $"delete {serviceName}");
+                Log("Service uninstalled successfully.");
+            }
+            catch (Exception ex)
+            {
+                Log($"Failed to uninstall service: {ex.Message}");
+            }
+        }
+
+        private static void RunCommand(string fileName, string arguments)
+        {
+            var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
                 {
-                    Log("Attempting initial mute");
-                    MuteVolume();
-                    Log($"Set volume to 0 and muted at program start at {DateTime.Now}");
+                    FileName = fileName,
+                    Arguments = arguments,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
                 }
-                catch (Exception ex)
-                {
-                    Log($"Error during initial mute: {ex.Message}");
-                }
+            };
 
-                // Subscribe to session switch events (lock/unlock)
-                SystemEvents.SessionSwitch += SystemEvents_SessionSwitch;
+            process.Start();
+            string output = process.StandardOutput.ReadToEnd();
+            string error = process.StandardError.ReadToEnd();
+            process.WaitForExit();
 
-                // Subscribe to session end events (log out, shutdown)
-                SystemEvents.SessionEnded += SystemEvents_SessionEnded;
+            if (process.ExitCode != 0)
+            {
+                throw new Exception($"Command '{fileName} {arguments}' failed with error: {error}");
+            }
 
-                // Handle application exit
-                AppDomain.CurrentDomain.ProcessExit += (s, e) =>
-                {
-                    SystemEvents.SessionSwitch -= SystemEvents_SessionSwitch;
-                    SystemEvents.SessionEnded -= SystemEvents_SessionEnded;
-                };
+            Log($"Command output: {output}");
+        }
 
-                // Keep the application running
-                while (true)
-                {
-                    System.Threading.Thread.Sleep(1000);
-                }
+        private static bool IsAdministrator()
+        {
+            using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
+            {
+                WindowsPrincipal principal = new WindowsPrincipal(identity);
+                return principal.IsInRole(WindowsBuiltInRole.Administrator);
             }
         }
 
@@ -206,7 +314,7 @@ namespace MuteLock
             Log($"Set volume to 0 and muted due to session end ({e.Reason}) at {DateTime.Now}");
         }
 
-        private static void MuteVolume()
+        public static void MuteVolume()
         {
             try
             {
@@ -224,7 +332,7 @@ namespace MuteLock
             }
         }
 
-        private static void Log(string message)
+        public static void Log(string message)
         {
             try
             {
@@ -291,7 +399,7 @@ namespace MuteLock
             public uint FileIndexLow;
         }
 
-        private static bool IsFileCompressed(string filePath)
+        public static bool IsFileCompressed(string filePath)
         {
             try
             {
@@ -332,7 +440,7 @@ namespace MuteLock
             }
         }
 
-        private static void SetNTFSCompression(string filePath)
+        public static void SetNTFSCompression(string filePath)
         {
             IntPtr handle = IntPtr.Zero;
             GCHandle pinnedBuffer = default;
@@ -387,6 +495,106 @@ namespace MuteLock
                     CloseHandle(handle);
                 }
             }
+        }
+    }
+
+    public class MuteLockService : ServiceBase
+    {
+        private static readonly string logFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs.txt");
+
+        public MuteLockService()
+        {
+            ServiceName = "MuteLock";
+            CanHandleSessionChangeEvent = true;
+        }
+
+        protected override void OnStart(string[] args)
+        {
+            Program.Log($"Service started at {DateTime.Now}");
+
+            // Ensure log file exists and apply NTFS compression if needed
+            try
+            {
+                if (!File.Exists(logFilePath))
+                {
+                    Program.Log("Creating log file");
+                    File.Create(logFilePath).Dispose();
+                    Program.Log("Applying NTFS compression to log file");
+                    Program.SetNTFSCompression(logFilePath);
+                }
+                else if (!Program.IsFileCompressed(logFilePath))
+                {
+                    Program.Log("Checking log file compression");
+                    Program.Log("Applying NTFS compression to log file");
+                    Program.SetNTFSCompression(logFilePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                Program.Log($"Failed to create or compress log file: {ex.Message}");
+            }
+
+            // Extract embedded NAudio.Wasapi.dll if it doesn't exist
+            string dllPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "NAudio.Wasapi.dll");
+            if (!File.Exists(dllPath))
+            {
+                Program.Log($"Attempting to extract NAudio.Wasapi.dll to {dllPath}");
+                try
+                {
+                    using (Stream resourceStream = Assembly.GetExecutingAssembly().GetManifestResourceStream("MuteLock.NAudio.Wasapi.dll"))
+                    {
+                        if (resourceStream == null)
+                        {
+                            Program.Log("Error: Embedded NAudio.Wasapi.dll resource not found.");
+                            return;
+                        }
+                        using (FileStream fileStream = new FileStream(dllPath, FileMode.Create, FileAccess.Write))
+                        {
+                            resourceStream.CopyTo(fileStream);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Program.Log($"Error extracting NAudio.Wasapi.dll: {ex.Message}");
+                    return;
+                }
+            }
+
+            // Mute audio after DLL extraction to ensure NAudio.Wasapi.dll is available
+            try
+            {
+                Program.Log("Attempting initial mute");
+                Program.MuteVolume();
+                Program.Log($"Set volume to 0 and muted at service start at {DateTime.Now}");
+            }
+            catch (Exception ex)
+            {
+                Program.Log($"Error during initial mute: {ex.Message}");
+            }
+        }
+
+        protected override void OnStop()
+        {
+            Program.Log($"Service stopped at {DateTime.Now}");
+        }
+
+        protected override void OnSessionChange(SessionChangeDescription changeDescription)
+        {
+            if (changeDescription.Reason == SessionChangeReason.SessionLock ||
+                changeDescription.Reason == SessionChangeReason.SessionUnlock ||
+                changeDescription.Reason == SessionChangeReason.SessionLogoff)
+            {
+                Program.MuteVolume();
+                Program.Log($"Set volume to 0 and muted due to {changeDescription.Reason} (Session {changeDescription.SessionId}) at {DateTime.Now}");
+            }
+        }
+
+        protected override void OnShutdown()
+        {
+            Program.MuteVolume();
+            Program.Log($"Set volume to 0 and muted due to system shutdown at {DateTime.Now}");
+            base.OnShutdown();
         }
     }
 }
