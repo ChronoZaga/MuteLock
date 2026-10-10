@@ -15,16 +15,25 @@ namespace MuteLock
 {
     class Program
     {
-        private static readonly string logFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs.txt");
         private static readonly string taskXmlPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "MuteLock.xml");
+        private static Assembly wasapiAssembly;
 
         static void Main(string[] args)
         {
+            // Load embedded NAudio.Wasapi.dll from base64 in memory when it is requested
+            AppDomain.CurrentDomain.AssemblyResolve += ResolveEmbeddedWasapi;
+
             if (Environment.UserInteractive)
             {
                 if (args.Length > 0)
                 {
-                    if (string.Equals(args[0], "/installservice", StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(args[0], "/xml", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Generate Scheduled Task XML
+                        GenerateTaskXml();
+                        return;
+                    }
+                    else if (string.Equals(args[0], "/installservice", StringComparison.OrdinalIgnoreCase))
                     {
                         InstallService();
                         return;
@@ -40,9 +49,6 @@ namespace MuteLock
                 // Log program start
                 Log($"Program started at {DateTime.Now}");
 
-                // Generate Scheduled Task XML
-                GenerateTaskXml();
-
                 // Check if another instance is already running
                 bool createdNew;
                 using (Mutex mutex = new Mutex(true, "MuteLock_SingleInstance", out createdNew))
@@ -53,61 +59,7 @@ namespace MuteLock
                         return;
                     }
 
-                    // Ensure log file exists and apply NTFS compression if needed
-                    try
-                    {
-                        if (!File.Exists(logFilePath))
-                        {
-                            Log("Creating log file");
-                            File.Create(logFilePath).Dispose();
-                            Log("Applying NTFS compression to log file");
-                            SetNTFSCompression(logFilePath);
-                        }
-                        else if (!IsFileCompressed(logFilePath))
-                        {
-                            Log("Checking log file compression");
-                            Log("Applying NTFS compression to log file");
-                            SetNTFSCompression(logFilePath);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"Failed to create or compress log file: {ex.Message}");
-                    }
-
-                    // Extract embedded NAudio.Wasapi.dll if it doesn't exist
-                    string dllPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "NAudio.Wasapi.dll");
-                    if (!File.Exists(dllPath))
-                    {
-                        Log($"Attempting to extract NAudio.Wasapi.dll to {dllPath}");
-                        try
-                        {
-                            using (Stream resourceStream = Assembly.GetExecutingAssembly().GetManifestResourceStream("MuteLock.NAudio.Wasapi.dll"))
-                            {
-                                if (resourceStream == null)
-                                {
-                                    Log("Error: Embedded NAudio.Wasapi.dll resource not found.");
-                                    return;
-                                }
-                                using (FileStream fileStream = new FileStream(dllPath, FileMode.Create, FileAccess.Write))
-                                {
-                                    resourceStream.CopyTo(fileStream);
-                                }
-                            }
-                        }
-                        catch (UnauthorizedAccessException)
-                        {
-                            Log("Error: Permission denied when extracting NAudio.Wasapi.dll. Please run the program as administrator to extract the DLL to Program Files.");
-                            return;
-                        }
-                        catch (Exception ex)
-                        {
-                            Log($"Error extracting NAudio.Wasapi.dll: {ex.Message}");
-                            return;
-                        }
-                    }
-
-                    // Mute audio after DLL extraction to ensure NAudio.Wasapi.dll is available
+                    // Mute audio (NAudio.Wasapi.dll is loaded from memory on first use)
                     try
                     {
                         Log("Attempting initial mute");
@@ -334,14 +286,28 @@ namespace MuteLock
 
         public static void Log(string message)
         {
-            try
+            // Logging to a TXT file is turned off in v3.0
+        }
+
+        private static Assembly ResolveEmbeddedWasapi(object sender, ResolveEventArgs args)
+        {
+            if (new AssemblyName(args.Name).Name != "NAudio.Wasapi")
             {
-                File.AppendAllText(logFilePath, $"[{DateTime.Now}] {message}{Environment.NewLine}");
+                return null;
             }
-            catch
+
+            if (wasapiAssembly == null)
             {
-                // Silently ignore logging errors to avoid creating any additional files
+                byte[] dllBytes = Convert.FromBase64String(EmbeddedWasapi.Data);
+                wasapiAssembly = Assembly.Load(dllBytes);
+
+                // Remove the base64 and decoded bytes from memory now that the assembly is loaded
+                EmbeddedWasapi.Data = null;
+                dllBytes = null;
+                GC.Collect();
             }
+
+            return wasapiAssembly;
         }
 
         // NTFS Compression methods
@@ -500,8 +466,6 @@ namespace MuteLock
 
     public class MuteLockService : ServiceBase
     {
-        private static readonly string logFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs.txt");
-
         public MuteLockService()
         {
             ServiceName = "MuteLock";
@@ -512,56 +476,7 @@ namespace MuteLock
         {
             Program.Log($"Service started at {DateTime.Now}");
 
-            // Ensure log file exists and apply NTFS compression if needed
-            try
-            {
-                if (!File.Exists(logFilePath))
-                {
-                    Program.Log("Creating log file");
-                    File.Create(logFilePath).Dispose();
-                    Program.Log("Applying NTFS compression to log file");
-                    Program.SetNTFSCompression(logFilePath);
-                }
-                else if (!Program.IsFileCompressed(logFilePath))
-                {
-                    Program.Log("Checking log file compression");
-                    Program.Log("Applying NTFS compression to log file");
-                    Program.SetNTFSCompression(logFilePath);
-                }
-            }
-            catch (Exception ex)
-            {
-                Program.Log($"Failed to create or compress log file: {ex.Message}");
-            }
-
-            // Extract embedded NAudio.Wasapi.dll if it doesn't exist
-            string dllPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "NAudio.Wasapi.dll");
-            if (!File.Exists(dllPath))
-            {
-                Program.Log($"Attempting to extract NAudio.Wasapi.dll to {dllPath}");
-                try
-                {
-                    using (Stream resourceStream = Assembly.GetExecutingAssembly().GetManifestResourceStream("MuteLock.NAudio.Wasapi.dll"))
-                    {
-                        if (resourceStream == null)
-                        {
-                            Program.Log("Error: Embedded NAudio.Wasapi.dll resource not found.");
-                            return;
-                        }
-                        using (FileStream fileStream = new FileStream(dllPath, FileMode.Create, FileAccess.Write))
-                        {
-                            resourceStream.CopyTo(fileStream);
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Program.Log($"Error extracting NAudio.Wasapi.dll: {ex.Message}");
-                    return;
-                }
-            }
-
-            // Mute audio after DLL extraction to ensure NAudio.Wasapi.dll is available
+            // Mute audio (NAudio.Wasapi.dll is loaded from memory on first use)
             try
             {
                 Program.Log("Attempting initial mute");
